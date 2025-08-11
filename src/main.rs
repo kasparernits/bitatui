@@ -1,19 +1,21 @@
-use std::process::Command;
 use std::io;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
+use crossterm::{
+    event::{self, Event, KeyCode},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
-    Terminal,
 };
-use crossterm::{
-    event::{self, Event, KeyCode},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
+
+use serde_json; // Add this line for JSON parsing
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
@@ -37,6 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     let mut selected = 0;
+    let mut last_input = Instant::now();
     let mut output = String::new();
     let mut output_lines: Vec<String> = Vec::new();
     let mut scroll_offset = 0;
@@ -46,12 +49,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // For node info refresh
     let mut node_info = String::new();
+    // For wallet info refresh
+    let mut wallet_info = String::new();
 
     // Initial fetch
     output = run_bitcoin_cli(commands[selected])?;
     output_lines = output.lines().map(|l| l.to_string()).collect();
 
-    node_info = fetch_node_info()?;
+    node_info = fetch_node_info().unwrap_or_else(|_| "Failed to fetch node info".to_string());
+    wallet_info = fetch_wallet_info().unwrap_or_else(|_| "Failed to fetch wallet info".to_string());
 
     loop {
         terminal.draw(|f| {
@@ -61,17 +67,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
                 .split(size);
 
-            // Left panel split vertically into info (30%) and commands (70%)
+            // Left panel split vertically into Node Info (7 lines), Wallet Info (7 lines), Commands (rest)
             let left_chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(7), Constraint::Min(0)])
+                .constraints([
+                    Constraint::Length(7),
+                    Constraint::Length(7),
+                    Constraint::Min(0),
+                ])
                 .split(chunks[0]);
 
             // Node Info Panel
             let node_info_paragraph = Paragraph::new(node_info.as_str())
-                .block(Block::default().title("Node Info").borders(Borders::ALL))
+                .block(
+                    Block::default()
+                        .title("Node Info")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Rgb(255, 165, 0))),
+                ) // orange
                 .wrap(Wrap { trim: true });
             f.render_widget(node_info_paragraph, left_chunks[0]);
+
+            // Wallet Info Panel
+            let wallet_info_paragraph = Paragraph::new(wallet_info.as_str())
+                .block(Block::default().title("Wallet Info").borders(Borders::ALL))
+                .wrap(Wrap { trim: true });
+            f.render_widget(wallet_info_paragraph, left_chunks[1]);
 
             // Commands List
             let items: Vec<ListItem> = commands
@@ -80,15 +101,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|(i, cmd)| {
                     let mut item = ListItem::new(cmd.to_string());
                     if i == selected {
-                        item = item.style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+                        item = item.style(
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        );
                     }
                     item
                 })
                 .collect();
 
-            let list = List::new(items)
-                .block(Block::default().title("Commands").borders(Borders::ALL));
-            f.render_widget(list, left_chunks[1]);
+            let list =
+                List::new(items).block(Block::default().title("Commands").borders(Borders::ALL));
+            f.render_widget(list, left_chunks[2]);
 
             // Right panel output window
             let height = chunks[1].height as usize;
@@ -110,14 +135,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Input handling with debounce
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
+                if last_input.elapsed() >= Duration::from_millis(150) {
                     match key.code {
                         KeyCode::Char('q') => break,
                         KeyCode::Char('r') => {
-                            // Refresh both output and node info
+                            // Refresh output, node info, and wallet info
                             output = run_bitcoin_cli(commands[selected])?;
                             output_lines = output.lines().map(|l| l.to_string()).collect();
                             if let Ok(info) = fetch_node_info() {
                                 node_info = info;
+                            }
+                            if let Ok(w_info) = fetch_wallet_info() {
+                                wallet_info = w_info;
                             }
                             scroll_offset = 0;
                         }
@@ -157,6 +186,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         _ => {}
                     }
+                    last_input = Instant::now();
+                }
             }
         }
     }
@@ -209,13 +240,31 @@ fn format_uptime(seconds: u64) -> String {
 }
 
 fn fetch_node_info() -> Result<String, Box<dyn std::error::Error>> {
-    let uptime_str = run_bitcoin_cli("uptime")?;   // Use `?` to unwrap the Result or handle error
+    // uptime is not a standard bitcoin-cli RPC call, so fallback if it fails
+    let uptime_str = run_bitcoin_cli("uptime").unwrap_or_else(|_| "0".to_string());
     let uptime = uptime_str.trim().parse().unwrap_or(0);
     let blockcount = run_bitcoin_cli("getblockcount")?.trim().to_string();
     let bestblockhash = run_bitcoin_cli("getbestblockhash")?.trim().to_string();
 
     Ok(format!(
         "Uptime: {}\nBlock Count: {}\nBest Block Hash:\n{}",
-        format_uptime(uptime), blockcount, bestblockhash
+        format_uptime(uptime),
+        blockcount,
+        bestblockhash
+    ))
+}
+
+fn fetch_wallet_info() -> Result<String, Box<dyn std::error::Error>> {
+    let output = run_bitcoin_cli("getwalletinfo")?;
+    let json: serde_json::Value = serde_json::from_str(&output)?;
+
+    let wallet_name = json["walletname"].as_str().unwrap_or("N/A");
+    let balance = json["balance"].as_f64().unwrap_or(0.0);
+    let tx_count = json["txcount"].as_u64().unwrap_or(0);
+    let keypool_size = json["keypoolsize"].as_u64().unwrap_or(0);
+
+    Ok(format!(
+        "Wallet: {}\nBalance: {:.8} BTC\nTransactions: {}\nKeypool Size: {}",
+        wallet_name, balance, tx_count, keypool_size
     ))
 }
