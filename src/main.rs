@@ -1,6 +1,9 @@
 use std::io;
-use std::process::Command;
 use std::time::{Duration, Instant};
+
+use serde_json;
+use std::fs::File;
+use std::io::BufReader;
 
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -15,7 +18,11 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 
-use serde_json; // Add this line for JSON parsing
+mod cli;
+mod node;
+
+use crate::cli::run_bitcoin_cli;
+use crate::node::{fetch_node_info, fetch_wallet_info};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
@@ -24,19 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let commands = vec![
-        "getblockchaininfo",
-        "getblockcount",
-        "getnetworkinfo",
-        "getmempoolinfo",
-        "getpeerinfo",
-        "getwalletinfo",
-        "getbestblockhash",
-        "getdifficulty",
-        "getchaintips",
-        "getrawmempool",
-        "estimatesmartfee 6",
-    ];
+    let commands = load_commands_from_json("commands.json")?;
 
     let mut selected = 0;
     let mut last_input = Instant::now();
@@ -53,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut wallet_info = String::new();
 
     // Initial fetch
-    output = run_bitcoin_cli(commands[selected])?;
+    output = run_bitcoin_cli(&commands[selected])?;
     output_lines = output.lines().map(|l| l.to_string()).collect();
 
     node_info = fetch_node_info().unwrap_or_else(|_| "Failed to fetch node info".to_string());
@@ -140,7 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('q') => break,
                         KeyCode::Char('r') => {
                             // Refresh output, node info, and wallet info
-                            output = run_bitcoin_cli(commands[selected])?;
+                            output = run_bitcoin_cli(&commands[selected])?;
                             output_lines = output.lines().map(|l| l.to_string()).collect();
                             if let Ok(info) = fetch_node_info() {
                                 node_info = info;
@@ -153,7 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Down => {
                             if selected < commands.len() - 1 {
                                 selected += 1;
-                                output = run_bitcoin_cli(commands[selected])?;
+                                output = run_bitcoin_cli(&commands[selected])?;
                                 output_lines = output.lines().map(|l| l.to_string()).collect();
                                 scroll_offset = 0;
                                 last_refresh = Instant::now();
@@ -162,7 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Up => {
                             if selected > 0 {
                                 selected -= 1;
-                                output = run_bitcoin_cli(commands[selected])?;
+                                output = run_bitcoin_cli(&commands[selected])?;
                                 output_lines = output.lines().map(|l| l.to_string()).collect();
                                 scroll_offset = 0;
                                 last_refresh = Instant::now();
@@ -179,7 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         KeyCode::Enter => {
-                            output = run_bitcoin_cli(commands[selected])?;
+                            output = run_bitcoin_cli(&commands[selected])?;
                             output_lines = output.lines().map(|l| l.to_string()).collect();
                             scroll_offset = 0;
                             last_refresh = Instant::now();
@@ -199,72 +194,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_bitcoin_cli(command: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let rpc_user = std::env::var("RPC_USER").unwrap_or_else(|_| "youruser".to_string());
-    let rpc_password = std::env::var("RPC_PASSWORD").unwrap_or_else(|_| "yourpassword".to_string());
-
-    let mut parts = command.split_whitespace();
-    let base_cmd = parts.next().unwrap();
-    let args: Vec<&str> = parts.collect();
-
-    let output = Command::new("bitcoin-cli")
-        .arg(format!("-rpcuser={}", rpc_user))
-        .arg(format!("-rpcpassword={}", rpc_password))
-        .arg(base_cmd)
-        .args(&args)
-        .output()?;
-
-    let out = if output.status.success() {
-        String::from_utf8_lossy(&output.stdout).to_string()
-    } else {
-        format!("Error: {}", String::from_utf8_lossy(&output.stderr))
-    };
-
-    Ok(out)
-}
-
-fn format_uptime(seconds: u64) -> String {
-    let minutes = seconds / 60;
-    let hours = minutes / 60;
-    let days = hours / 24;
-
-    if days > 0 {
-        let rem_hours = hours % 24;
-        format!("{} day(s) {} hour(s)", days, rem_hours)
-    } else if hours > 0 {
-        let rem_minutes = minutes % 60;
-        format!("{} hour(s) {} minute(s)", hours, rem_minutes)
-    } else {
-        format!("{} minute(s)", minutes)
-    }
-}
-
-fn fetch_node_info() -> Result<String, Box<dyn std::error::Error>> {
-    // uptime is not a standard bitcoin-cli RPC call, so fallback if it fails
-    let uptime_str = run_bitcoin_cli("uptime").unwrap_or_else(|_| "0".to_string());
-    let uptime = uptime_str.trim().parse().unwrap_or(0);
-    let blockcount = run_bitcoin_cli("getblockcount")?.trim().to_string();
-    let bestblockhash = run_bitcoin_cli("getbestblockhash")?.trim().to_string();
-
-    Ok(format!(
-        "Uptime: {}\nBlock Count: {}\nBest Block Hash:\n{}",
-        format_uptime(uptime),
-        blockcount,
-        bestblockhash
-    ))
-}
-
-fn fetch_wallet_info() -> Result<String, Box<dyn std::error::Error>> {
-    let output = run_bitcoin_cli("getwalletinfo")?;
-    let json: serde_json::Value = serde_json::from_str(&output)?;
-
-    let wallet_name = json["walletname"].as_str().unwrap_or("N/A");
-    let balance = json["balance"].as_f64().unwrap_or(0.0);
-    let tx_count = json["txcount"].as_u64().unwrap_or(0);
-    let keypool_size = json["keypoolsize"].as_u64().unwrap_or(0);
-
-    Ok(format!(
-        "Wallet: {}\nBalance: {:.8} BTC\nTransactions: {}\nKeypool Size: {}",
-        wallet_name, balance, tx_count, keypool_size
-    ))
+fn load_commands_from_json(path: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let commands: Vec<String> = serde_json::from_reader(reader)?;
+    Ok(commands)
 }

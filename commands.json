@@ -1,0 +1,13 @@
+[
+    "getblockchaininfo",
+    "getnetworkinfo",
+    "getblockcount",
+    "getmempoolinfo",
+    "getpeerinfo",
+    "getwalletinfo",
+    "getbestblockhash",
+    "getdifficulty",
+    "getchaintips",
+    "getrawmempool",
+    "estimatesmartfee 6"
+]
