@@ -78,7 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Block::default()
                         .title("Node Info")
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Rgb(255, 165, 0))),
+                        .border_style(Style::default()),
                 ) // orange
                 .wrap(Wrap { trim: true });
             f.render_widget(node_info_paragraph, left_chunks[0]);
@@ -106,8 +106,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .collect();
 
-            let list =
-                List::new(items).block(Block::default().title("Commands").borders(Borders::ALL));
+            let list = List::new(items).block(
+                Block::default()
+                    .title("Commands (↑ / ↓) ")
+                    .borders(Borders::ALL),
+            );
             f.render_widget(list, left_chunks[2]);
 
             // Right panel output window
@@ -122,7 +125,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let paragraph = Paragraph::new(visible_lines.join("\n"))
-                .block(Block::default().title("Output").borders(Borders::ALL))
+                .block(
+                    Block::default()
+                        .title("Output (j / k to scroll) ")
+                        .borders(Borders::ALL),
+                )
                 .wrap(Wrap { trim: false });
             f.render_widget(paragraph, chunks[1]);
         })?;
