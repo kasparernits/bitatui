@@ -1,12 +1,9 @@
 use std::fs::File;
-use std::io;
-use std::io::BufReader;
+use std::io::{self, BufReader};
 use std::time::{Duration, Instant};
 
-use serde_json;
-
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -20,18 +17,18 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
-// QR + validation
-use bitcoin::{Address, Network};
-use core::str::FromStr;
 use qrcode::QrCode;
 use qrcode::render::unicode;
 
-// Clipboard
+use bitcoin::{Address, Network};
+use core::str::FromStr;
+
 use arboard::Clipboard;
 
-// Persistent address book
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json;
+
+use chrono::{DateTime, Utc};
 
 mod cli;
 mod node;
@@ -55,18 +52,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Load command list for left panel
+    // Load command list (left pane)
     let commands = load_commands_from_json("commands.json")?;
 
     // Main UI state
-    let mut selected = 0;
+    let mut selected = 0usize;
     let mut last_input = Instant::now();
     let mut output = String::new();
     let mut output_lines: Vec<String> = Vec::new();
-    let mut scroll_offset = 0;
+    let mut scroll_offset = 0usize;
 
     let _refresh_interval = Duration::from_secs(5);
-    let mut last_refresh = Instant::now();
+    let mut _last_refresh = Instant::now();
 
     // Node/Wallet info
     let mut node_info = String::new();
@@ -76,7 +73,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut show_qr_overlay = false;
     let mut address = String::from("bc1qfpacvgpjms0eu6mszhwgjjs03yldesmmcgzad0");
     let mut addr_cursor: usize = address.len();
-    let mut overlay_status: Option<(String, Instant)> = None; // short messages in overlay
 
     // Address book state (persistent)
     let mut addr_book: Vec<AddressEntry> = load_address_book(ADDRESS_BOOK_PATH);
@@ -96,22 +92,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         terminal.draw(|f| {
             let size = f.size();
-            let chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+
+            // Root: main area + bottom help bar (height 4 to show 2 lines comfortably)
+            let root = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(4)])
                 .split(size);
 
-            // Left panel: Node Info (7), Wallet Info (7), Commands (rest)
+            // ===== Main content (top) =====
+            let main_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+                .split(root[0]);
+
+            // Left: Node Info (7), Wallet Info (7), Commands (rest)
             let left_chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(7),
-                    Constraint::Length(7),
-                    Constraint::Min(0),
-                ])
-                .split(chunks[0]);
+                .constraints([Constraint::Length(7), Constraint::Length(7), Constraint::Min(0)])
+                .split(main_chunks[0]);
 
-            // Node Info Panel
+            // Node Info panel
             let node_info_paragraph = Paragraph::new(node_info.as_str())
                 .block(
                     Block::default()
@@ -122,13 +122,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .wrap(Wrap { trim: true });
             f.render_widget(node_info_paragraph, left_chunks[0]);
 
-            // Wallet Info Panel
+            // Wallet Info panel
             let wallet_info_paragraph = Paragraph::new(wallet_info.as_str())
                 .block(Block::default().title("Wallet Info").borders(Borders::ALL))
                 .wrap(Wrap { trim: true });
             f.render_widget(wallet_info_paragraph, left_chunks[1]);
 
-            // Commands List
+            // Commands list
             let items: Vec<ListItem> = commands
                 .iter()
                 .enumerate()
@@ -145,15 +145,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .collect();
 
-            let list = List::new(items).block(
-                Block::default()
-                    .title("Commands (↑/↓) • Enter=run • r=refresh • w=QR overlay • q=quit")
-                    .borders(Borders::ALL),
-            );
+            let list = List::new(items).block(Block::default().title("Commands").borders(Borders::ALL));
             f.render_widget(list, left_chunks[2]);
 
-            // Right panel output window
-            let height = chunks[1].height as usize;
+            // Right: Output panel
+            let height = main_chunks[1].height as usize;
             let visible_height = if height > 2 { height - 2 } else { 0 };
             let visible_lines = if output_lines.len() > visible_height + scroll_offset {
                 &output_lines[scroll_offset..scroll_offset + visible_height]
@@ -164,15 +160,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let paragraph = Paragraph::new(visible_lines.join("\n"))
+                .block(Block::default().title("Output").borders(Borders::ALL))
+                .wrap(Wrap { trim: false });
+            f.render_widget(paragraph, main_chunks[1]);
+
+            // ===== Bottom Help bar =====
+            let orange = Color::Rgb(255, 165, 0);
+            let help_lines: Vec<Line> = if show_qr_overlay {
+                vec![
+                    Line::from(Span::styled(
+                        "Overlay keys:",
+                        Style::default().fg(orange).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(
+                        "Ctrl+N=new(save)  Ctrl+G=getnew  Ctrl+C=copy  ↑/↓=select saved  ←/→ Home End Backspace Delete=edit  Ctrl+X=close",
+                    ),
+                ]
+            } else {
+                vec![
+                    Line::from(Span::styled(
+                        "Main keys:",
+                        Style::default().fg(orange).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from("↑/↓=select command  Enter=run  r=refresh  j/k=scroll output  w=QR overlay  q=quit"),
+                ]
+            };
+
+            let help = Paragraph::new(help_lines)
+                .wrap(Wrap { trim: true })
                 .block(
                     Block::default()
-                        .title("Output (j / k to scroll) ")
-                        .borders(Borders::ALL),
-                )
-                .wrap(Wrap { trim: false });
-            f.render_widget(paragraph, chunks[1]);
+                        .title("Help")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(orange)),
+                );
+            f.render_widget(help, root[1]);
 
-            // ===== Overlay (modal) for Address Book + QR =====
+            // ===== Overlay on top (if active) =====
             if show_qr_overlay {
                 let orange = Color::Rgb(255, 165, 0);
                 let area = centered_rect(80, 75, size);
@@ -182,7 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let outer = Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(orange))
-                    .title(" Address Book & QR (type to edit • n=new(save) • g=getnew • c=copy • ↑/↓ select • x/Esc close) ");
+                    .title(" Address Book & QR (edit left • list right) ");
                 f.render_widget(outer, area);
 
                 // Split overlay horizontally: left (editor + QR), right (list)
@@ -192,34 +216,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
                     .split(area);
 
-                // Left column: help, input, QR
+                // Left column: input, QR
                 let left = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(3),
-                        Constraint::Length(3),
-                        Constraint::Min(8),
-                    ])
+                    .constraints([Constraint::Length(3), Constraint::Min(8)])
                     .split(cols[0]);
-
-                // Help + ephemeral status
-                let mut help_lines: Vec<Line> = vec![
-                    Line::from(Span::styled(
-                        "Edit the address to regenerate the QR",
-                        Style::default().fg(orange).add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from("n=new(save) • g=getnew • c=copy • ←/→ • Backspace/Delete • Home/End • ↑/↓ select list • x/Esc close"),
-                ];
-                if let Some((msg, ts)) = &overlay_status {
-                    if ts.elapsed() < Duration::from_secs(2) {
-                        help_lines.push(Line::from(Span::styled(
-                            msg.as_str(),
-                            Style::default().fg(Color::Cyan),
-                        )));
-                    }
-                }
-                let help = Paragraph::new(help_lines).wrap(Wrap { trim: true });
-                f.render_widget(help, left[0]);
 
                 // Validation
                 let validity = check_address(&address);
@@ -241,11 +242,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ),
                         AddrValidity::ValidAny(net) => {
                             let label = match net {
-                                Network::Bitcoin  => "VALID (mainnet)",
-                                Network::Testnet  => "VALID (testnet)",
+                                Network::Bitcoin => "VALID (mainnet)",
+                                Network::Testnet => "VALID (testnet)",
                                 Network::Testnet4 => "VALID (testnet4)",
-                                Network::Signet   => "VALID (signet)",
-                                Network::Regtest  => "VALID (regtest)",
+                                Network::Signet => "VALID (signet)",
+                                Network::Regtest => "VALID (regtest)",
                             };
                             (
                                 " BTC Address — VALID ".to_string(),
@@ -263,13 +264,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .border_style(Style::default().fg(orange))
                     .title(Span::styled(input_title.clone(), input_title_style));
                 let input = Paragraph::new(address.clone()).block(input_block);
-                f.render_widget(input, left[1]);
+                f.render_widget(input, left[0]);
 
                 // Cursor inside input
-                let cursor_x = (left[1].x + 1).saturating_add(addr_cursor as u16);
-                let cursor_y = left[1].y + 1;
+                let cursor_x = (left[0].x + 1).saturating_add(addr_cursor as u16);
+                let cursor_y = left[0].y + 1;
                 f.set_cursor(
-                    cursor_x.min(left[1].x + left[1].width.saturating_sub(2)),
+                    cursor_x.min(left[0].x + left[0].width.saturating_sub(2)),
                     cursor_y,
                 );
 
@@ -283,101 +284,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if qr_dim {
                     qr_par = qr_par.style(Style::default().fg(Color::DarkGray));
                 }
-                f.render_widget(qr_par, left[2]);
+                f.render_widget(qr_par, left[1]);
 
                 // Right column: address list
-                let list_items: Vec<ListItem> = addr_book.iter().enumerate().map(|(i, e)| {
-                    // compact date + truncated addr
-                    let date_str = e.created_at.format("%Y-%m-%d %H:%M").to_string();
-                    let shown = if e.address.len() > 22 {
-                        format!("{}  {}…{}", date_str, &e.address[..12], &e.address[e.address.len()-8..])
-                    } else {
-                        format!("{}  {}", date_str, e.address)
-                    };
-                    let mut item = ListItem::new(shown);
-                    if i == addr_selected {
-                        item = item.style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
-                    }
-                    item
-                }).collect();
+                let list_items: Vec<ListItem> = addr_book
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| {
+                        let date_str = e.created_at.format("%Y-%m-%d %H:%M").to_string();
+                        let shown = if e.address.len() > 22 {
+                            format!(
+                                "{}  {}…{}",
+                                date_str,
+                                &e.address[..12],
+                                &e.address[e.address.len() - 8..]
+                            )
+                        } else {
+                            format!("{}  {}", date_str, e.address)
+                        };
+                        let mut item = ListItem::new(shown);
+                        if i == addr_selected {
+                            item = item.style(
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            );
+                        }
+                        item
+                    })
+                    .collect();
 
                 let list_block = Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(orange))
-                    .title(" Addresses (↑/↓ select • n=new(save)) ");
+                    .title(" Addresses (↑/↓ select) ");
                 let list = List::new(list_items).block(list_block);
                 f.render_widget(list, cols[1]);
             }
         })?;
 
-        // Input handling with debounce
+        // ===== Input handling =====
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                if last_input.elapsed() >= Duration::from_millis(150) {
+                if last_input.elapsed() >= Duration::from_millis(120) {
                     if show_qr_overlay {
                         // Keys active while overlay is open
-                        match key.code {
-                            KeyCode::Esc | KeyCode::Char('x') => {
-                                show_qr_overlay = false;
-                            }
-                            // Move cursor in input
-                            KeyCode::Left => {
-                                if addr_cursor > 0 {
-                                    addr_cursor -= 1;
-                                }
-                            }
-                            KeyCode::Right => {
-                                if addr_cursor < address.len() {
-                                    addr_cursor += 1;
-                                }
-                            }
-                            KeyCode::Home => {
-                                addr_cursor = 0;
-                            }
-                            KeyCode::End => {
-                                addr_cursor = address.len();
-                            }
-                            KeyCode::Backspace => {
-                                if addr_cursor > 0 && !address.is_empty() {
-                                    address.remove(addr_cursor - 1);
-                                    addr_cursor -= 1;
-                                }
-                            }
-                            KeyCode::Delete => {
-                                if addr_cursor < address.len() && !address.is_empty() {
-                                    address.remove(addr_cursor);
-                                }
-                            }
-                            // List selection up/down
-                            KeyCode::Up => {
-                                if !addr_book.is_empty() && addr_selected > 0 {
-                                    addr_selected -= 1;
-                                    address = addr_book[addr_selected].address.clone();
-                                    addr_cursor = address.len();
-                                }
-                            }
-                            KeyCode::Down => {
-                                if !addr_book.is_empty() && addr_selected + 1 < addr_book.len() {
-                                    addr_selected += 1;
-                                    address = addr_book[addr_selected].address.clone();
-                                    addr_cursor = address.len();
-                                }
-                            }
-                            // Get new address (no save)
-                            KeyCode::Char('g') => match run_bitcoin_cli("getnewaddress") {
-                                Ok(s) => {
-                                    address = s.trim().to_string();
-                                    addr_cursor = address.len();
-                                    overlay_status =
-                                        Some(("New address fetched".into(), Instant::now()));
-                                }
-                                Err(e) => {
-                                    overlay_status =
-                                        Some((format!("getnewaddress error: {e}"), Instant::now()));
-                                }
-                            },
-                            // New + save to address book
-                            KeyCode::Char('n') => {
+                        match (key.modifiers, key.code) {
+                            // ---- Ctrl combos ----
+                            (m, KeyCode::Char('n')) if m.contains(KeyModifiers::CONTROL) => {
                                 match run_bitcoin_cli("getnewaddress") {
                                     Ok(s) => {
                                         let new_addr = s.trim().to_string();
@@ -390,53 +344,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 address: new_addr.clone(),
                                             };
                                             addr_book.push(entry);
-                                            // persist
-                                            match save_address_book(ADDRESS_BOOK_PATH, &addr_book) {
-                                                Ok(()) => {
-                                                    overlay_status = Some((
-                                                        "New address saved".into(),
-                                                        Instant::now(),
-                                                    ))
-                                                }
-                                                Err(e) => {
-                                                    overlay_status = Some((
-                                                        format!("Save failed: {e}"),
-                                                        Instant::now(),
-                                                    ))
-                                                }
-                                            }
-                                            // select it + show on left
+                                            let _ =
+                                                save_address_book(ADDRESS_BOOK_PATH, &addr_book);
                                             addr_selected = addr_book.len() - 1;
                                             address = new_addr;
                                             addr_cursor = address.len();
-                                        } else {
-                                            overlay_status = Some((
-                                                "RPC returned invalid address".into(),
-                                                Instant::now(),
-                                            ));
                                         }
                                     }
-                                    Err(e) => {
-                                        overlay_status = Some((
-                                            format!("getnewaddress error: {e}"),
-                                            Instant::now(),
-                                        ));
-                                    }
+                                    Err(_) => {}
                                 }
                             }
-                            // Copy to clipboard
-                            KeyCode::Char('c') => match copy_to_clipboard(&address) {
-                                Ok(()) => {
-                                    overlay_status =
-                                        Some(("Copied to clipboard".into(), Instant::now()))
+                            (m, KeyCode::Char('g')) if m.contains(KeyModifiers::CONTROL) => {
+                                if let Ok(s) = run_bitcoin_cli("getnewaddress") {
+                                    address = s.trim().to_string();
+                                    addr_cursor = address.len();
                                 }
-                                Err(e) => {
-                                    overlay_status =
-                                        Some((format!("Copy failed: {e}"), Instant::now()))
+                            }
+                            (m, KeyCode::Char('c')) if m.contains(KeyModifiers::CONTROL) => {
+                                let _ = copy_to_clipboard(&address);
+                            }
+                            (m, KeyCode::Char('x')) if m.contains(KeyModifiers::CONTROL) => {
+                                show_qr_overlay = false; // close overlay
+                            }
+
+                            // ---- Navigation in list ----
+                            (_, KeyCode::Up) => {
+                                if !addr_book.is_empty() && addr_selected > 0 {
+                                    addr_selected -= 1;
+                                    address = addr_book[addr_selected].address.clone();
+                                    addr_cursor = address.len();
                                 }
-                            },
-                            // Typing into input
-                            KeyCode::Char(c) => {
+                            }
+                            (_, KeyCode::Down) => {
+                                if !addr_book.is_empty() && addr_selected + 1 < addr_book.len() {
+                                    addr_selected += 1;
+                                    address = addr_book[addr_selected].address.clone();
+                                    addr_cursor = address.len();
+                                }
+                            }
+
+                            // ---- Editing the input ----
+                            (_, KeyCode::Left) => {
+                                if addr_cursor > 0 {
+                                    addr_cursor -= 1;
+                                }
+                            }
+                            (_, KeyCode::Right) => {
+                                if addr_cursor < address.len() {
+                                    addr_cursor += 1;
+                                }
+                            }
+                            (_, KeyCode::Home) => {
+                                addr_cursor = 0;
+                            }
+                            (_, KeyCode::End) => {
+                                addr_cursor = address.len();
+                            }
+                            (_, KeyCode::Backspace) => {
+                                if addr_cursor > 0 && !address.is_empty() {
+                                    address.remove(addr_cursor - 1);
+                                    addr_cursor -= 1;
+                                }
+                            }
+                            (_, KeyCode::Delete) => {
+                                if addr_cursor < address.len() && !address.is_empty() {
+                                    address.remove(addr_cursor);
+                                }
+                            }
+                            (_, KeyCode::Char(c)) => {
                                 if !c.is_control() && c != ' ' {
                                     address.insert(addr_cursor.min(address.len()), c);
                                     addr_cursor = (addr_cursor + 1).min(address.len());
@@ -445,10 +420,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             _ => {}
                         }
                         last_input = Instant::now();
-                        continue; // skip main view keys when overlay is open
+                        continue; // don't process main keys while modal is open
                     }
 
-                    // Main view keys (when overlay is closed)
+                    // Main view keys (overlay closed)
                     match key.code {
                         KeyCode::Char('q') => break,
                         KeyCode::Char('w') => {
@@ -459,7 +434,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             addr_cursor = address.len();
                         }
                         KeyCode::Char('r') => {
-                            // Refresh output, node info, and wallet info
                             output = run_bitcoin_cli(&commands[selected])?;
                             output_lines = output.lines().map(|l| l.to_string()).collect();
                             if let Ok(info) = fetch_node_info() {
@@ -476,7 +450,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 output = run_bitcoin_cli(&commands[selected])?;
                                 output_lines = output.lines().map(|l| l.to_string()).collect();
                                 scroll_offset = 0;
-                                last_refresh = Instant::now();
+                                _last_refresh = Instant::now();
                             }
                         }
                         KeyCode::Up => {
@@ -485,7 +459,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 output = run_bitcoin_cli(&commands[selected])?;
                                 output_lines = output.lines().map(|l| l.to_string()).collect();
                                 scroll_offset = 0;
-                                last_refresh = Instant::now();
+                                _last_refresh = Instant::now();
                             }
                         }
                         KeyCode::PageDown | KeyCode::Char('j') => {
@@ -502,7 +476,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             output = run_bitcoin_cli(&commands[selected])?;
                             output_lines = output.lines().map(|l| l.to_string()).collect();
                             scroll_offset = 0;
-                            last_refresh = Instant::now();
+                            _last_refresh = Instant::now();
                         }
                         _ => {}
                     }
@@ -571,7 +545,6 @@ fn check_address(addr: &str) -> AddrValidity {
     }
     match Address::from_str(s) {
         Ok(a) => {
-            // Promote to a checked address by testing known networks
             for net in [
                 Network::Bitcoin,
                 Network::Testnet,
@@ -599,7 +572,7 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 
 // ===== Address book persistence =====
 fn load_address_book(path: &str) -> Vec<AddressEntry> {
-    match std::fs::File::open(path) {
+    match File::open(path) {
         Ok(f) => match serde_json::from_reader::<_, Vec<AddressEntry>>(f) {
             Ok(list) => list,
             Err(_) => Vec::new(),
