@@ -47,6 +47,9 @@ struct AddressEntry {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
+
+    let mut hide_amounts = false;
+
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
@@ -123,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             f.render_widget(node_info_paragraph, left_chunks[0]);
 
             // Wallet Info panel
-            let wallet_info_paragraph = Paragraph::new(wallet_info.as_str())
+            let wallet_info_paragraph = Paragraph::new(mask_digits_if(&wallet_info, hide_amounts))
                 .block(Block::default().title("Wallet Info").borders(Borders::ALL))
                 .wrap(Wrap { trim: true });
             f.render_widget(wallet_info_paragraph, left_chunks[1]);
@@ -182,7 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "Main keys:",
                         Style::default().fg(orange).add_modifier(Modifier::BOLD),
                     )),
-                    Line::from("↑/↓=select command  Enter=run  r=refresh  j/k=scroll output  w=QR overlay  q=quit"),
+                   Line::from("↑/↓=select command  Enter=run  r=refresh  j/k=scroll output  h=hide/show amounts w=QR overlay  q=quit"),
                 ]
             };
 
@@ -425,6 +428,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Main view keys (overlay closed)
                     match key.code {
+                        KeyCode::Char('h') => {
+                            hide_amounts = !hide_amounts;
+                        }
                         KeyCode::Char('q') => break,
                         KeyCode::Char('w') => {
                             show_qr_overlay = true;
@@ -584,4 +590,14 @@ fn load_address_book(path: &str) -> Vec<AddressEntry> {
 fn save_address_book(path: &str, entries: &Vec<AddressEntry>) -> Result<(), String> {
     let data = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
     std::fs::write(path, data).map_err(|e| e.to_string())
+}
+
+// ===== Amount masking (no regex, keeps punctuation/currency) =====
+fn mask_digits_if(s: &str, hide: bool) -> String {
+    if !hide {
+        return s.to_string();
+    }
+    s.chars()
+        .map(|c| if c.is_ascii_digit() { 'X' } else { c })
+        .collect()
 }

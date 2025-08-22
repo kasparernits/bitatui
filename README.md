@@ -15,3 +15,4 @@ setx RPC_PASSWORD your_rpc_password
 - Run bitcoin-cli commands
 - Generate QR code for wallet address
 
+![alt text](./img/logo.png "Ratatui")
