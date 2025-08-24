@@ -9,5 +9,5 @@
     "getdifficulty",
     "getchaintips",
     "getrawmempool",
-    "estimatesmartfee 6"
+    "getrawmempool true"
 ]

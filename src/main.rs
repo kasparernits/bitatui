@@ -1,5 +1,3 @@
-use std::fs::File;
-use std::io::{self, BufReader};
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -24,29 +22,25 @@ use bitcoin::{Address, Network};
 use core::str::FromStr;
 
 use arboard::Clipboard;
+use std::io::{self};
 
-use serde::{Deserialize, Serialize};
-use serde_json;
-
-use chrono::{DateTime, Utc};
+use chrono::{Utc};
 
 mod cli;
 mod node;
+mod file;
 
 use crate::cli::run_bitcoin_cli;
 use crate::node::{fetch_node_info, fetch_wallet_info};
+use crate::file::{load_commands_from_json, load_address_book, save_address_book};
 
-// ===== Address book types & constants =====
-const ADDRESS_BOOK_PATH: &str = "addresses.json";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AddressEntry {
-    created_at: DateTime<Utc>,
-    address: String,
-}
+use file::AddressEntry;
+use file::ADDRESS_BOOK_PATH;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
+
+    const VERSION_LABEL: &str = concat!(" bitatui ", env!("CARGO_PKG_VERSION"));
 
     let mut hide_amounts = false;
 
@@ -93,15 +87,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     wallet_info = fetch_wallet_info().unwrap_or_else(|_| "Failed to fetch wallet info".to_string());
 
     loop {
-        terminal.draw(|f| {
+            terminal.draw(|f| {
             let size = f.size();
+
+            // === NEW: global background ===
+            let bg_block = Block::default()
+                .style(Style::default());
+                // .style(Style::default().bg(Color::Rgb(58, 100, 148)));
+
+            f.render_widget(bg_block, size);
 
             // Root: main area + bottom help bar (height 4 to show 2 lines comfortably)
             let root = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(0), Constraint::Length(4)])
                 .split(size);
-
+            
             // ===== Main content (top) =====
             let main_chunks = Layout::default()
                 .direction(Direction::Horizontal)
@@ -201,7 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // ===== Overlay on top (if active) =====
             if show_qr_overlay {
-                let orange = Color::Rgb(255, 165, 0);
+                let orange = Color::Rgb(245, 200, 66);
                 let area = centered_rect(80, 75, size);
                 f.render_widget(Clear, area);
 
@@ -324,6 +325,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let list = List::new(list_items).block(list_block);
                 f.render_widget(list, cols[1]);
             }
+            // === Version label (top-right, single line, no box) ===
+            {
+                use ratatui::text::{Line, Span};
+                use ratatui::widgets::Paragraph;
+                use ratatui::layout::Alignment;
+
+                let size = f.size();
+                let version_area = Rect {
+                    x: size.x,
+                    y: size.y,          // top row
+                    width: size.width,  // full width so we can right-align
+                    height: 1,
+                };
+
+                let version_text = Paragraph::new(Line::from(Span::styled(
+                    VERSION_LABEL,
+                    Style::default()
+                        .fg(Color::Rgb(180, 180, 180)) // tweak if it blends with your bg
+                        .add_modifier(Modifier::BOLD),
+                )))
+                .alignment(Alignment::Right);
+
+                f.render_widget(version_text, version_area);
+            }
+
         })?;
 
         // ===== Input handling =====
@@ -499,13 +525,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn load_commands_from_json(path: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let commands: Vec<String> = serde_json::from_reader(reader)?;
-    Ok(commands)
-}
-
 // ===== Helpers for overlay & QR =====
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -574,22 +593,6 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
     clipboard
         .set_text(text.to_owned())
         .map_err(|e| e.to_string())
-}
-
-// ===== Address book persistence =====
-fn load_address_book(path: &str) -> Vec<AddressEntry> {
-    match File::open(path) {
-        Ok(f) => match serde_json::from_reader::<_, Vec<AddressEntry>>(f) {
-            Ok(list) => list,
-            Err(_) => Vec::new(),
-        },
-        Err(_) => Vec::new(),
-    }
-}
-
-fn save_address_book(path: &str, entries: &Vec<AddressEntry>) -> Result<(), String> {
-    let data = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
-    std::fs::write(path, data).map_err(|e| e.to_string())
 }
 
 // ===== Amount masking (no regex, keeps punctuation/currency) =====
