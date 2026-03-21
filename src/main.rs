@@ -11,16 +11,18 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
 };
 
+mod api;
 mod app;
-mod cli;
+mod bitcoin;
+mod config;
+mod error;
 mod file;
-mod node;
 mod ui;
 
 use app::{App, AppAction};
 
 const VERSION_LABEL: &str = concat!(" bitatui ", env!("CARGO_PKG_VERSION"));
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
@@ -43,6 +45,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn std::er
     let mut app = App::initialize()?;
 
     loop {
+        app.update();
         terminal.draw(|f| ui::draw(f, &app, VERSION_LABEL))?;
 
         if event::poll(POLL_INTERVAL)? {

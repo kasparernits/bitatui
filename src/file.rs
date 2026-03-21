@@ -1,12 +1,10 @@
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::fs::File;
 use std::io::BufReader;
+use std::path::Path;
 
 use chrono::{DateTime, Utc};
-
-// ===== Address book types & constants =====
-pub const ADDRESS_BOOK_PATH: &str = "addresses.json";
+use crate::error::AppResult;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddressEntry {
@@ -14,26 +12,30 @@ pub struct AddressEntry {
     pub address: String,
 }
 
-pub(crate) fn load_commands_from_json(
-    path: &str,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let file = File::open(path)?;
+pub(crate) fn load_commands_from_json(path: &str) -> AppResult<Vec<String>> {
+    let final_path = if Path::new(path).exists() {
+        path
+    } else if Path::new("commands.json").exists() {
+        "commands.json"
+    } else {
+        path
+    };
+
+    let file = File::open(final_path)?;
     let reader = BufReader::new(file);
     let commands: Vec<String> = serde_json::from_reader(reader)?;
     Ok(commands)
 }
 
 pub(crate) fn load_address_book(path: &str) -> Vec<AddressEntry> {
-    match File::open(path) {
-        Ok(f) => match serde_json::from_reader::<_, Vec<AddressEntry>>(f) {
-            Ok(list) => list,
-            Err(_) => Vec::new(),
-        },
-        Err(_) => Vec::new(),
-    }
+    File::open(path)
+        .ok()
+        .and_then(|f| serde_json::from_reader(f).ok())
+        .unwrap_or_default()
 }
 
-pub(crate) fn save_address_book(path: &str, entries: &Vec<AddressEntry>) -> Result<(), String> {
-    let data = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
-    std::fs::write(path, data).map_err(|e| e.to_string())
+pub(crate) fn save_address_book(path: &str, entries: &Vec<AddressEntry>) -> AppResult<()> {
+    let data = serde_json::to_string_pretty(entries)?;
+    std::fs::write(path, data)?;
+    Ok(())
 }

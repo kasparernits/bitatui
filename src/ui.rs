@@ -30,6 +30,7 @@ pub fn draw(f: &mut Frame<'_>, app: &App, version_label: &str) {
             Constraint::Length(7),
             Constraint::Length(7),
             Constraint::Min(0),
+            Constraint::Length(6),
         ])
         .split(main_chunks[0]);
 
@@ -67,6 +68,16 @@ pub fn draw(f: &mut Frame<'_>, app: &App, version_label: &str) {
 
     let list = List::new(items).block(Block::default().title("Commands").borders(Borders::ALL));
     f.render_widget(list, left_chunks[2]);
+
+    let price_paragraph = Paragraph::new(app.price_info.as_str())
+        .block(
+            Block::default()
+                .title("BTC Prices")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .wrap(Wrap { trim: true });
+    f.render_widget(price_paragraph, left_chunks[3]);
 
     let height = main_chunks[1].height as usize;
     let visible_height = height.saturating_sub(2);
